@@ -1,0 +1,83 @@
+{
+  "name": "accessible-agent",
+  "displayName": "AccessibleAgent",
+  "description": "A starter VS Code extension scaffold for accessibility tooling.",
+  "version": "0.0.1",
+  "publisher": "your-publisher",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:accessibleAgent.helloWorld",
+    "onCommand:accessibleAgent.makeAccessible",
+    "onView:accessibleAgent.sidebar"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "accessibleAgent",
+          "title": "AccessibleAgent",
+          "icon": "media/accessible-agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "accessibleAgent": [
+        {
+          "type": "webview",
+          "id": "accessibleAgent.sidebar",
+          "name": "AccessibleAgent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "accessibleAgent.helloWorld",
+        "title": "AccessibleAgent: Hello World"
+      },
+      {
+        "command": "accessibleAgent.makeAccessible",
+        "title": "AccessibleAgent: Make Current File Accessible"
+      }
+    ],
+    "configuration": {
+      "title": "AccessibleAgent",
+      "properties": {
+        "accessibleAgent.srcEndpoint": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Sourcegraph endpoint for Cody API (example: `https://your-host.sourcegraph.com`). You can also set `SRC_ENDPOINT` as an environment variable."
+        },
+        "accessibleAgent.srcAccessToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Sourcegraph access token. WARNING: stored in settings in plain text. Prefer setting the `SRC_ACCESS_TOKEN` environment variable.",
+          "scope": "machine-overridable"
+        },
+        "accessibleAgent.modelId": {
+          "type": "string",
+          "default": "anthropic::2023-06-01::claude-3.5-sonnet",
+          "markdownDescription": "Model ID to use for `/.api/llm/chat/completions`. Override via `CODY_MODEL_ID` env var if needed."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "echo \"No lint configured\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "1.90.0",
+    "typescript": "^5.4.5",
+    "undici": "^6.19.8"
+  }
+}
+

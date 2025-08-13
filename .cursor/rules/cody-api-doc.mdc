@@ -1,0 +1,884 @@
+---
+alwaysApply: false
+---
+Sourcegraph API Reference
+This is a work-in-progress list of all the API operations available in the Sourcegraph API.
+
+OpenAPI schema: public-openapi.yaml
+
+Method	Path	Description
+POST	/.api/cody/context	Send a natural language query with a list of repositories, and Cody locates related code examples from those repos.
+POST	/.api/llm/chat/completions	Send a structured list of input messages with text and/or image content, and the model will generate the next message in the conversation.
+POST	/.api/llm/chat/completions/stream	This endpoint does not exist. It's only used to document the shape of `/.api/llm/chat/completions` when `"stream": true`.
+GET	/.api/llm/models	Lists the currently available models, and provides basic information about each one such as the owner and availability.
+GET	/.api/llm/models/{modelId}	Retrieves a model instance, providing basic information about the model such as the owner and permissioning.
+Quickstart
+Get started by sending your first API requests from the command line in 10 minutes or less.
+
+In this guide, you'll learn how to list models and sent your first completion request to the Sourcegraph API from the command line using curl.
+
+Set up your environment
+Create an access token by following the instructions. We recommend that you create separate access tokens for each use, so that you can revoke access without affecting other uses.
+
+Set the SRC_ACCESS_TOKEN environment variable to the access token you created in the previous step.
+
+SRC_ACCESS_TOKEN=<token acquired from the Sourcegraph web UI>
+Also, set the SRC_ENDPOINT environment variable to the hostname of the Sourcegraph instance you want to use.
+
+SRC_ENDPOINT=https://your-host.sourcegraph.com
+List the supported models
+Use the command line and curl to get a list of the models supported by the API.
+
+curl --request GET \
+  --url $SRC_ENDPOINT/.api/llm/models \
+  --header 'Accept: application/json' \
+  --header "Authorization: token $SRC_ACCESS_TOKEN"
+The output should look something like this (pipe it into jq -r to make it easier to read):
+
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "anthropic::2023-06-01::claude-3.5-sonnet",
+      "object": "model",
+      "created": 0,
+      "owned_by": "anthropic"
+    },
+    ... other models
+  ]
+}
+Now choose an appropriate model for your use case. A good all around model, balancing speed an power, is Anthropic Claude 3.5 Sonnet.
+
+MODEL=anthropic::2023-06-01::claude-3.5-sonnet
+Send a completion request
+Use the command line and curl to send a completion request to the API.
+
+curl --request POST \
+  --url $SRC_ENDPOINT/.api/llm/chat/completions \
+  --header 'Accept: application/json' \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: token $SRC_ACCESS_TOKEN" \
+  --data '{
+    "messages": [{"role": "user", "content": "Output just the command to create a git branch from the command line"}],
+    "model": "'"${MODEL}"'",,
+    "max_tokens": 1000
+  }'
+If you get an unsupported chat model error, please ensure you are using a valide model ID. You can find valid model IDs by using the GET /.api/llm/models endpoint.
+
+The output should look something like this (pipe it into jq -r to make it easier to read):
+
+{
+  "id": "chat-1f6342b0-6f04-460f-b154-989ce6da920d",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "Here's the command to create a git branch from the command line:
+
+git branch <branch-name>",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1729587345,
+  "model": "anthropic::2023-06-01::claude-3.5-sonnet",
+  "system_fingerprint": "",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 0,
+    "prompt_tokens": 0,
+    "total_tokens": 0
+  }
+}
+Congratulations!
+You've successfully sent your first API request from the command line! 🎉🎉
+
+You can now explore the API further by reading this API reference.
+
+Additional resources
+For detailed information on how to use the API:
+
+Examples - Various code examples using the API.
+GraphQL - GraphQL API which provides programmatic access to code search, git metadata, and repository information.
+GraphQL API Console - interactive GraphQL API explorer.
+Stream - GraphQL API which enables code search with streaming results.
+#POST /.api/cody/context
+Send a natural language query with a list of repositories, and Cody locates related code examples from those repos.
+
+Example
+
+curl
+curl "$SRC_ENDPOINT/.api/cody/context" \
+  --header "Authorization: token $SRC_ACCESS_TOKEN" \
+  --request POST \
+  --data '{
+    "codeResultsCount": 5,
+    "filePatterns": [
+      "^agent/.*"
+    ],
+    "query": "what is the agent?",
+    "repos": [
+      {
+        "name": "github.com/sourcegraph/cody"
+      }
+    ],
+    "textResultsCount": 10
+  }'
+Example response:
+
+{
+  "results": [
+    {
+      "blob": {
+        "commit": {
+          "oid": "fedd5d4c4af5c30b9eb661465b86155fe550cd60"
+        },
+        "path": "agent/README.md",
+        "repository": {
+          "id": "UmVwb3NpdG9yeTo2MTMyNTMyOA==",
+          "name": "github.com/sourcegraph/cody"
+        },
+        "url": "/github.com/sourcegraph/cody@fedd5d4c4af5c30b9eb661465b86155fe550cd60/-/blob/agent/README.md"
+      },
+      "chunkContent": "# Cody Agent\nThe `@sourcegraph/cody-agent` package implements a JSON-RPC server to interact\nwith Cody via stdout/stdin. This package is intended to be used by\nnon-ECMAScript clients such as the JetBrains and NeoVim plugins.",
+      "endLine": 3,
+      "startLine": 0
+    }
+  ]
+}
+#Request: application/json
+Field	Type	Required	Description
+# codeResultsCount	integer	No	
+The number of results to return from source code (example: Python or TypeScript).
+Range: 0 <= x <= 100
+# filePatterns	string[]	No	
+An optional list of file patterns used to filter the results. The patterns are regex strings. For a file chunk to be returned a context result, the path must match at least one of these patterns.
+# query	string	Yes	
+The natural language query to find relevant context from the provided list of repos.
+# repos	RepoSpec[]	No	
+The list of repos to search through.
+# textResultsCount	integer	No	
+The number of results to return from text sources like Markdown.
+Range: 0 <= x <= 100
+# version	string	No	
+The version number of the context API
+
+Valid versions:
+
+"1.0": The old context API (default).
+"2.0": The new context API.
+One of: "1.0","2.0"
+# RepoSpec.id	string	No	
+The ID of the repository.
+# RepoSpec.name	string	No	
+The name of the repository.
+#SDK
+
+TypeScript
+interface CodyContextRequest {
+    codeResultsCount: number
+    filePatterns: string[]
+    query: string
+    repos: RepoSpec[]
+    textResultsCount: number
+    version: '1.0' | '2.0'
+}
+
+interface RepoSpec {
+    id: string
+    name: string
+}
+#Response: application/json
+Field	Type	Required	Description
+# results	FileChunkContext[]	Yes	
+The list of file chunks that are relevant to the provided natural language query.
+# FileChunkContext.blob	BlobInfo	Yes	
+Information about the blob containing the file chunk.
+# FileChunkContext.chunkContent	string	Yes	
+The content of the file chunk that is relevant to the provided natural language query.
+# FileChunkContext.endLine	integer	Yes	
+The end line number of the file chunk.
+# FileChunkContext.startLine	integer	Yes	
+The start line number of the file chunk.
+# BlobInfo.commit	CommitInfo	Yes	
+Information about the commit containing the blob.
+# BlobInfo.path	string	Yes	
+The file path to the blob.
+# BlobInfo.repository	RepositoryInfo	Yes	
+Information about the repository containing the blob.
+# BlobInfo.url	string	Yes	
+A canonical URL to the blob, relative to the Sourcegraph instance.
+# CommitInfo.oid	string	Yes	
+The commit hash (aka. OID).
+# RepositoryInfo.id	string	Yes	
+The repository ID, which is stable even if the repository name changes.
+# RepositoryInfo.name	string	Yes	
+The repository name.
+#SDK
+
+TypeScript
+interface CodyContextResponse {
+    results: FileChunkContext[]
+}
+
+interface FileChunkContext {
+    blob: BlobInfo
+    chunkContent: string
+    endLine: number
+    startLine: number
+}
+
+interface BlobInfo {
+    commit: CommitInfo
+    path: string
+    repository: RepositoryInfo
+    url: string
+}
+
+interface CommitInfo {
+    oid: string
+}
+
+interface RepositoryInfo {
+    id: string
+    name: string
+}
+#POST /.api/llm/chat/completions
+Send a structured list of input messages with text and/or image content, and the model will generate the next message in the conversation.
+
+Example
+
+curl
+curl "$SRC_ENDPOINT/.api/llm/chat/completions" \
+  --header "Authorization: token $SRC_ACCESS_TOKEN" \
+  --request POST \
+  --data '{
+    "max_tokens": 2000,
+    "messages": [
+      {
+        "content": "what is the difference between URI and URL?",
+        "role": "user"
+      }
+    ],
+    "model": "anthropic::2023-06-01::claude-3.5-sonnet"
+  }'
+Example response:
+
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "URIs identify, URLs locate",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1727692163829,
+  "id": "chat-UUID",
+  "model": "anthropic::2023-06-01::claude-3.5-sonnet",
+  "object": "object"
+}
+#Request: application/json
+Field	Type	Required	Description
+# frequency_penalty	number	No	
+Unsupported.
+# logit_bias	object	No	
+Unsupported.
+# logprobs	boolean	No	
+Unsupported.
+# max_tokens	integer	No	
+The maximum number of tokens that can be generated in the completion.
+Maximum: 4000
+# messages	ChatCompletionRequestMessage[]	No	
+A list of messages to start the thread with.
+# model	string	Yes	
+A model name using the syntax ${ProviderID}::${APIVersionID}::${ModelID}:
+
+ProviderID: lowercase name of the LLM provider. Example: "anthropic" in "anthropic::2023-06-01::claude-3.5-sonnet".
+APIVersionID: the upstream LLM provider API version. Typically formatted as a date. Example, "2024-02-01" in "openai::2024-02-01::gpt-4o".
+ModelID: the name of the model. Example, "mixtral-8x7b-instruct" in "mistral::v1::mixtral-8x7b-instruct".
+Use GET /.api/llm/models to list available models.
+
+# n	integer	No	
+The number of completions to generate. Only one completion is supported.
+Range: 1 <= x <= 1
+# presence_penalty	number	No	
+Unsupported.
+# response_format	string	No	
+Only the "text" format is supported.
+One of: "text","json_object"
+# seed	integer	No	
+Unsupported.
+# service_tier	string	No	
+Unsupported.
+# stop	string | string[]	No	
+Unsupported.
+# stream	boolean	No	
+Unsupported.
+# stream_options	ChatCompletionStreamOptions	No	
+Unsupported.
+# temperature	number	No	
+The sampling temperature. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. If set to 0, the model will use log probability to automatically increase the temperature until certain thresholds are hit.
+Range: 0 <= x <= 1
+# tools	AssistantToolsFunction[]	No	
+A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can only be of type function.
+# top_logprobs	integer	No	
+Unsupported.
+# top_p	number	No	
+An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered.
+
+We generally recommend altering this or temperature but not both.
+
+# user	string	No	
+Unsupported.
+# ChatCompletionRequestMessage.content	string | MessageContentPart[]	Yes	
+The content of the message.
+# ChatCompletionRequestMessage.role	string	Yes	
+The role of the message sender.
+
+The "system" role is unsupported at this moment.
+
+One of: "user","assistant","system"
+# ChatCompletionStreamOptions.include_usage	boolean	No	
+Unsupported.
+# AssistantToolsFunction.function	FunctionObject	Yes	
+# AssistantToolsFunction.type	string	Yes	Value: "function"
+# MessageContentPart.text	string	Yes	
+The text content of the message.
+# MessageContentPart.type	string	Yes	
+The type of the message content part.
+Value: "text"
+# FunctionObject.description	string	No	
+A description of what the function does, used by the model to choose when and how to call the function.
+# FunctionObject.name	string	Yes	
+The name of the function to be called. Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64.
+# FunctionObject.parameters	object	No	
+The parameters the functions accepts, described as a JSON Schema object. See the guide for examples, and the JSON Schema reference for documentation about the format.
+
+Omitting parameters defines a function with an empty parameter list.
+
+# FunctionObject.strict	boolean	No	
+Whether to enable strict schema adherence when generating the function call. If set to true, the model will follow the exact schema defined in the parameters field. Only a subset of JSON Schema is supported when strict is true.
+#SDK
+
+TypeScript
+interface CreateChatCompletionRequest {
+    frequency_penalty: number | null
+    logit_bias: any | null
+    logprobs: boolean | null
+    max_tokens: number | null
+    messages: ChatCompletionRequestMessage[]
+    model: string
+    n: number | null
+    presence_penalty: number | null
+    response_format: 'text' | 'json_object' | null
+    seed: number | null
+    service_tier: string | null
+    stop: string | string[] | null
+    stream: boolean | null
+    stream_options: ChatCompletionStreamOptions
+    temperature: number | null
+    tools: AssistantToolsFunction[]
+    top_logprobs: number | null
+    top_p: number | null
+    user: string | null
+}
+
+interface ChatCompletionRequestMessage {
+    content: string | MessageContentPart[]
+    role: 'user' | 'assistant' | 'system'
+}
+
+interface ChatCompletionStreamOptions {
+    include_usage: boolean | null
+}
+
+interface AssistantToolsFunction {
+    function: FunctionObject
+    type: 'function'
+}
+
+interface MessageContentPart {
+    text: string
+    type: 'text'
+}
+
+interface FunctionObject {
+    description: string
+    name: string
+    parameters: any
+    strict: boolean | null
+}
+#Response: application/json
+Field	Type	Required	Description
+# choices	ChatCompletionChoice[]	Yes	
+The list of completion choices. Always a single completion at this moment. The n parameter in the request is ignored.
+# created	integer	Yes	
+The Unix timestamp (in seconds) when the completion was created.
+# id	string	Yes	
+A unique ID for this completion response.
+# model	string	Yes	
+The model used to generate the completion.
+# object	string	Yes	
+The object type, which is always "object".
+Value: "object"
+# service_tier	string	No	
+Unsupported.
+# system_fingerprint	string	No	
+Unsupported.
+# usage	CompletionUsage	No	
+The number of used input and output tokens.
+# ChatCompletionChoice.finish_reason	string	No	
+The reason why the completion stopped.
+One of: "stop","length"
+# ChatCompletionChoice.index	integer	Yes	
+The index of the completion choice. Always 0 at this moment.
+# ChatCompletionChoice.logprobs	ChatCompletionLogprobs	No	
+# ChatCompletionChoice.message	ChatCompletionResponseMessage	Yes	
+The message generated by the completion.
+# CompletionUsage.completion_tokens	integer	Yes	
+Number of tokens in the generated completion.
+# CompletionUsage.credits	integer	Yes	
+Credits consumed by the request, if evaluated.
+# CompletionUsage.prompt_tokens	integer	Yes	
+Number of tokens in the prompt.
+# CompletionUsage.prompt_tokens_details	PromptTokensDetails	No	
+Breakdown of tokens used in the prompt. Docs: https://platform.openai.com/docs/api-reference/chat/create
+# CompletionUsage.total_tokens	integer	Yes	
+Total number of tokens used in the request (prompt + completion).
+# ChatCompletionLogprobs.content	ChatCompletionTokenLogprob[]	No	
+Unsupported.
+# ChatCompletionResponseMessage.content	string	Yes	
+The content of the generated message.
+
+Can be null when tools are used.
+
+# ChatCompletionResponseMessage.role	string	Yes	
+The role of the message sender.
+One of: "user","assistant"
+# ChatCompletionResponseMessage.tool_calls	ToolCall[]	No	
+# PromptTokensDetails.cache_creation_input_tokens	integer	No	
+Number of tokens written to the cache when creating a new entry. Note: this field is only set when using Anthropic as an LLM Provider.
+# PromptTokensDetails.cached_tokens	integer	No	
+Cached tokens present in the prompt. Equivalent to Anthropic's cache_read_input_tokens
+# ChatCompletionTokenLogprob.bytes	integer[]	Yes	
+Unsupported.
+# ChatCompletionTokenLogprob.logprob	number	Yes	
+Unsupported.
+# ChatCompletionTokenLogprob.token	string	Yes	
+Unsupported.
+# ChatCompletionTokenLogprob.top_logprobs	object	Yes	
+Unsupported.
+# ToolCall.function	ToolCallFunction	Yes	
+The function that the model called.
+# ToolCall.id	string	Yes	
+The ID of the tool call.
+# ToolCall.type	string	Yes	
+The type of the tool. Currently, only function is supported.
+Value: "function"
+# ToolCallFunction.arguments	string	Yes	
+The arguments to call the function with, as generated by the model in JSON format. Note that the model does not always generate valid JSON, and may hallucinate parameters not defined by your function schema. Validate the arguments in your code before calling your function.
+# ToolCallFunction.name	string	Yes	
+The name of the function to call.
+#SDK
+
+TypeScript
+interface CreateChatCompletionResponse {
+    choices: ChatCompletionChoice[]
+    created: number
+    id: string
+    model: string
+    object: 'object'
+    service_tier: string | null
+    system_fingerprint: string | null
+    usage: CompletionUsage
+}
+
+interface ChatCompletionChoice {
+    finish_reason: 'stop' | 'length' | null
+    index: number
+    logprobs: ChatCompletionLogprobs
+    message: ChatCompletionResponseMessage
+}
+
+interface CompletionUsage {
+    completion_tokens: number
+    credits: number | null
+    prompt_tokens: number
+    prompt_tokens_details: PromptTokensDetails
+    total_tokens: number
+}
+
+interface ChatCompletionLogprobs {
+    content: ChatCompletionTokenLogprob[]
+}
+
+interface ChatCompletionResponseMessage {
+    content: string | null
+    role: 'user' | 'assistant'
+    tool_calls: ToolCall[] | null
+}
+
+interface PromptTokensDetails {
+    cache_creation_input_tokens: number | null
+    cached_tokens: number | null
+}
+
+interface ChatCompletionTokenLogprob {
+    bytes: number[]
+    logprob: number
+    token: string
+    top_logprobs: {
+        bytes: number[]
+        logprob: number
+        token: string
+    }
+}
+
+interface ToolCall {
+    function: ToolCallFunction
+    id: string
+    type: 'function'
+}
+
+interface ToolCallFunction {
+    arguments: string
+    name: string
+}
+#POST /.api/llm/chat/completions/stream
+This endpoint does not exist. It's only used to document the shape of `/.api/llm/chat/completions` when `"stream": true`.
+
+#Request: application/json
+Field	Type	Required	Description
+# frequency_penalty	number	No	
+Unsupported.
+# logit_bias	object	No	
+Unsupported.
+# logprobs	boolean	No	
+Unsupported.
+# max_tokens	integer	No	
+The maximum number of tokens that can be generated in the completion.
+Maximum: 4000
+# messages	ChatCompletionRequestMessage[]	No	
+A list of messages to start the thread with.
+# model	string	Yes	
+A model name using the syntax ${ProviderID}::${APIVersionID}::${ModelID}:
+
+ProviderID: lowercase name of the LLM provider. Example: "anthropic" in "anthropic::2023-06-01::claude-3.5-sonnet".
+APIVersionID: the upstream LLM provider API version. Typically formatted as a date. Example, "2024-02-01" in "openai::2024-02-01::gpt-4o".
+ModelID: the name of the model. Example, "mixtral-8x7b-instruct" in "mistral::v1::mixtral-8x7b-instruct".
+Use GET /.api/llm/models to list available models.
+
+# n	integer	No	
+The number of completions to generate. Only one completion is supported.
+Range: 1 <= x <= 1
+# presence_penalty	number	No	
+Unsupported.
+# response_format	string	No	
+Only the "text" format is supported.
+One of: "text","json_object"
+# seed	integer	No	
+Unsupported.
+# service_tier	string	No	
+Unsupported.
+# stop	string | string[]	No	
+Unsupported.
+# stream	boolean	No	
+Unsupported.
+# stream_options	ChatCompletionStreamOptions	No	
+Unsupported.
+# temperature	number	No	
+The sampling temperature. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. If set to 0, the model will use log probability to automatically increase the temperature until certain thresholds are hit.
+Range: 0 <= x <= 1
+# tools	AssistantToolsFunction[]	No	
+A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can only be of type function.
+# top_logprobs	integer	No	
+Unsupported.
+# top_p	number	No	
+An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered.
+
+We generally recommend altering this or temperature but not both.
+
+# user	string	No	
+Unsupported.
+# ChatCompletionRequestMessage.content	string | MessageContentPart[]	Yes	
+The content of the message.
+# ChatCompletionRequestMessage.role	string	Yes	
+The role of the message sender.
+
+The "system" role is unsupported at this moment.
+
+One of: "user","assistant","system"
+# ChatCompletionStreamOptions.include_usage	boolean	No	
+Unsupported.
+# AssistantToolsFunction.function	FunctionObject	Yes	
+# AssistantToolsFunction.type	string	Yes	Value: "function"
+# MessageContentPart.text	string	Yes	
+The text content of the message.
+# MessageContentPart.type	string	Yes	
+The type of the message content part.
+Value: "text"
+# FunctionObject.description	string	No	
+A description of what the function does, used by the model to choose when and how to call the function.
+# FunctionObject.name	string	Yes	
+The name of the function to be called. Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum length of 64.
+# FunctionObject.parameters	object	No	
+The parameters the functions accepts, described as a JSON Schema object. See the guide for examples, and the JSON Schema reference for documentation about the format.
+
+Omitting parameters defines a function with an empty parameter list.
+
+# FunctionObject.strict	boolean	No	
+Whether to enable strict schema adherence when generating the function call. If set to true, the model will follow the exact schema defined in the parameters field. Only a subset of JSON Schema is supported when strict is true.
+#SDK
+
+TypeScript
+interface CreateChatCompletionRequest {
+    frequency_penalty: number | null
+    logit_bias: any | null
+    logprobs: boolean | null
+    max_tokens: number | null
+    messages: ChatCompletionRequestMessage[]
+    model: string
+    n: number | null
+    presence_penalty: number | null
+    response_format: 'text' | 'json_object' | null
+    seed: number | null
+    service_tier: string | null
+    stop: string | string[] | null
+    stream: boolean | null
+    stream_options: ChatCompletionStreamOptions
+    temperature: number | null
+    tools: AssistantToolsFunction[]
+    top_logprobs: number | null
+    top_p: number | null
+    user: string | null
+}
+
+interface ChatCompletionRequestMessage {
+    content: string | MessageContentPart[]
+    role: 'user' | 'assistant' | 'system'
+}
+
+interface ChatCompletionStreamOptions {
+    include_usage: boolean | null
+}
+
+interface AssistantToolsFunction {
+    function: FunctionObject
+    type: 'function'
+}
+
+interface MessageContentPart {
+    text: string
+    type: 'text'
+}
+
+interface FunctionObject {
+    description: string
+    name: string
+    parameters: any
+    strict: boolean | null
+}
+#Response: application/json
+Field	Type	Required	Description
+# data	CreateChatCompletionStreamResponse	Yes	
+# CreateChatCompletionStreamResponse.choices	ChatCompletionChunkChoice[]	Yes	
+An array of chat completion choices. Can contain one or more elements.
+# CreateChatCompletionStreamResponse.created	integer	Yes	
+The Unix timestamp (in seconds) of when the chat completion was created.
+# CreateChatCompletionStreamResponse.id	string	Yes	
+A unique identifier for this chat completion.
+# CreateChatCompletionStreamResponse.model	string	Yes	
+The model used for the chat completion.
+# CreateChatCompletionStreamResponse.object	string	Yes	
+The object type, which is always 'chat.completion.chunk'
+Value: "chat.completion.chunk"
+# CreateChatCompletionStreamResponse.system_fingerprint	string	No	
+The system fingerprint of the model used.
+# CreateChatCompletionStreamResponse.usage	CompletionUsage	No	
+Usage statistics for the request. Only present in the last chunk if include_usage is set to true.
+# ChatCompletionChunkChoice.delta	ChatCompletionStreamResponseDelta	Yes	
+The partial message data for this choice
+# ChatCompletionChunkChoice.finish_reason	string	No	
+The reason the model stopped generating tokens. This will be stop if the model hit a natural stop point or a provided stop sequence, length if the maximum number of tokens specified in the request was reached, content_filter if content was omitted due to a flag from our content filters, tool_calls if the model called a tool, or function_call (deprecated) if the model called a function.
+One of: "stop","length","tool_calls","content_filter","function_call"
+# ChatCompletionChunkChoice.index	integer	Yes	
+The index of the choice in the list of choices.
+# ChatCompletionChunkChoice.logprobs	ChatCompletionLogprobs	No	
+Unsupported.
+# CompletionUsage.completion_tokens	integer	Yes	
+Number of tokens in the generated completion.
+# CompletionUsage.credits	integer	Yes	
+Credits consumed by the request, if evaluated.
+# CompletionUsage.prompt_tokens	integer	Yes	
+Number of tokens in the prompt.
+# CompletionUsage.prompt_tokens_details	PromptTokensDetails	No	
+Breakdown of tokens used in the prompt. Docs: https://platform.openai.com/docs/api-reference/chat/create
+# CompletionUsage.total_tokens	integer	Yes	
+Total number of tokens used in the request (prompt + completion).
+# ChatCompletionStreamResponseDelta.content	string	No	
+The contents of the chunk message.
+# ChatCompletionStreamResponseDelta.refusal	string	No	
+The refusal message generated by the model.
+# ChatCompletionStreamResponseDelta.role	string	No	
+The role of the author of this message.
+One of: "system","user","assistant","tool"
+# ChatCompletionStreamResponseDelta.tool_calls	ChatCompletionMessageToolCallChunk[]	No	
+Array of tool calls in this delta
+# ChatCompletionLogprobs.content	ChatCompletionTokenLogprob[]	No	
+Unsupported.
+# PromptTokensDetails.cache_creation_input_tokens	integer	No	
+Number of tokens written to the cache when creating a new entry. Note: this field is only set when using Anthropic as an LLM Provider.
+# PromptTokensDetails.cached_tokens	integer	No	
+Cached tokens present in the prompt. Equivalent to Anthropic's cache_read_input_tokens
+# ChatCompletionMessageToolCallChunk.function	ToolCallFunction	Yes	
+The function that the model called.
+# ChatCompletionMessageToolCallChunk.id	string	Yes	
+The ID of the tool call.
+# ChatCompletionMessageToolCallChunk.index	integer	Yes	
+The index of the tool call.
+# ChatCompletionMessageToolCallChunk.type	string	Yes	
+The type of the tool. Currently, only function is supported.
+Value: "function"
+# ChatCompletionTokenLogprob.bytes	integer[]	Yes	
+Unsupported.
+# ChatCompletionTokenLogprob.logprob	number	Yes	
+Unsupported.
+# ChatCompletionTokenLogprob.token	string	Yes	
+Unsupported.
+# ChatCompletionTokenLogprob.top_logprobs	object	Yes	
+Unsupported.
+# ToolCallFunction.arguments	string	Yes	
+The arguments to call the function with, as generated by the model in JSON format. Note that the model does not always generate valid JSON, and may hallucinate parameters not defined by your function schema. Validate the arguments in your code before calling your function.
+# ToolCallFunction.name	string	Yes	
+The name of the function to call.
+#SDK
+
+TypeScript
+interface CreateChatCompletionsStreamEvents {
+    data: CreateChatCompletionStreamResponse
+}
+
+interface CreateChatCompletionStreamResponse {
+    choices: ChatCompletionChunkChoice[]
+    created: number
+    id: string
+    model: string
+    object: 'chat.completion.chunk'
+    system_fingerprint: string | null
+    usage: CompletionUsage
+}
+
+interface ChatCompletionChunkChoice {
+    delta: ChatCompletionStreamResponseDelta
+    finish_reason: 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call' | null
+    index: number
+    logprobs: ChatCompletionLogprobs
+}
+
+interface CompletionUsage {
+    completion_tokens: number
+    credits: number | null
+    prompt_tokens: number
+    prompt_tokens_details: PromptTokensDetails
+    total_tokens: number
+}
+
+interface ChatCompletionStreamResponseDelta {
+    content: string | null
+    refusal: string | null
+    role: 'system' | 'user' | 'assistant' | 'tool' | null
+    tool_calls: ChatCompletionMessageToolCallChunk[] | null
+}
+
+interface ChatCompletionLogprobs {
+    content: ChatCompletionTokenLogprob[]
+}
+
+interface PromptTokensDetails {
+    cache_creation_input_tokens: number | null
+    cached_tokens: number | null
+}
+
+interface ChatCompletionMessageToolCallChunk {
+    function: ToolCallFunction
+    id: string
+    index: number
+    type: 'function'
+}
+
+interface ChatCompletionTokenLogprob {
+    bytes: number[]
+    logprob: number
+    token: string
+    top_logprobs: {
+        bytes: number[]
+        logprob: number
+        token: string
+    }
+}
+
+interface ToolCallFunction {
+    arguments: string
+    name: string
+}
+#GET /.api/llm/models
+Lists the currently available models, and provides basic information about each one such as the owner and availability.
+
+#Response: application/json
+Field	Type	Required	Description
+# data	OAIModel[]	Yes	
+The list of models.
+# object	string	Yes	
+The object type, which is always "list".
+Value: "list"
+# OAIModel.created	integer	Yes	
+The Unix timestamp (in seconds) when the model was created.
+# OAIModel.id	string	Yes	
+The model identifier, which can be referenced in the API endpoints.
+# OAIModel.object	string	Yes	
+The object type, which is always "model".
+Value: "model"
+# OAIModel.owned_by	string	Yes	
+The organization that owns the model.
+#SDK
+
+TypeScript
+interface OAIListModelsResponse {
+    data: OAIModel[]
+    object: 'list'
+}
+
+interface OAIModel {
+    created: number
+    id: string
+    object: 'model'
+    owned_by: string
+}
+#GET /.api/llm/models/{modelId}
+Retrieves a model instance, providing basic information about the model such as the owner and permissioning.
+
+#Request: application/json
+#Response: application/json
+Field	Type	Required	Description
+# created	integer	Yes	
+The Unix timestamp (in seconds) when the model was created.
+# id	string	Yes	
+The model identifier, which can be referenced in the API endpoints.
+# object	string	Yes	
+The object type, which is always "model".
+Value: "model"
+# owned_by	string	Yes	
+The organization that owns the model.
+#SDK
+
+TypeScript
+interface OAIModel {
+    created: number
+    id: string
+    object: 'model'
+    owned_by: string
+}
