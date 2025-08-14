@@ -1,6 +1,6 @@
 {
   "name": "accessible-agent",
-  "displayName": "AccessibleAgent",
+  "displayName": "Galaxy Accessibility Agent",
   "description": "A starter VS Code extension scaffold for accessibility tooling.",
   "version": "0.0.1",
   "publisher": "your-publisher",
@@ -21,7 +21,7 @@
       "activitybar": [
         {
           "id": "accessibleAgent",
-          "title": "AccessibleAgent",
+          "title": "Galaxy Accessibility Agent",
           "icon": "media/accessible-agent.svg"
         }
       ]
@@ -31,22 +31,22 @@
         {
           "type": "webview",
           "id": "accessibleAgent.sidebar",
-          "name": "AccessibleAgent"
+          "name": "Galaxy Accessibility Agent"
         }
       ]
     },
     "commands": [
       {
         "command": "accessibleAgent.helloWorld",
-        "title": "AccessibleAgent: Hello World"
+        "title": "Galaxy Accessibility Agent: Hello World"
       },
       {
         "command": "accessibleAgent.makeAccessible",
-        "title": "AccessibleAgent: Make Current File Accessible"
+        "title": "Galaxy Accessibility Agent: Make Current File Accessible"
       }
     ],
     "configuration": {
-      "title": "AccessibleAgent",
+      "title": "Galaxy Accessibility Agent",
       "properties": {
         "accessibleAgent.srcEndpoint": {
           "type": "string",
