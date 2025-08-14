@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { diffLines, Change, applyPatch } from 'diff';
 
+let lastAppliedBackup: { uri: string; content: string } | null = null;
+
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand('accessibleAgent.helloWorld', () => {
     vscode.window.showInformationMessage('Galaxy Accessibility Agent is ready.');
@@ -68,7 +70,8 @@ export function activate(context: vscode.ExtensionContext) {
               vscode.window.showInformationMessage('No structured update found. Check the sidebar output.');
               return;
             }
-            // Apply edit to current document
+            // Backup then apply edit to current document
+            lastAppliedBackup = { uri: document.uri.toString(), content: fileText };
             await applyFullDocumentEdit(activeEditor, updatedContent);
             vscode.window.setStatusBarMessage('Galaxy Accessibility Agent: Edits applied', 3000);
           } catch (error: unknown) {
@@ -138,6 +141,15 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+        case 'revertChanges': {
+          try {
+            await this.handleRevert();
+            this.post({ type: 'status', payload: 'Reverted last applied edits.' });
+          } catch (e: any) {
+            this.post({ type: 'error', payload: e?.message || String(e) });
+          }
+          break;
+        }
         default:
           break;
       }
@@ -149,6 +161,24 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
 
   private post(msg: any) {
     this.view?.webview.postMessage(msg);
+  }
+
+  private async handleRevert(): Promise<void> {
+    if (!lastAppliedBackup) {
+      throw new Error('Nothing to revert. Make some edits first.');
+    }
+    const activeEditor = vscode.window.activeTextEditor;
+    if (!activeEditor) {
+      throw new Error('No active editor to revert.');
+    }
+    const doc = activeEditor.document;
+    const targetUri = doc.uri.toString();
+    if (lastAppliedBackup.uri !== targetUri) {
+      throw new Error('Last edit was for a different file. Open that file to revert.');
+    }
+    const backup = lastAppliedBackup.content;
+    await applyFullDocumentEdit(activeEditor, backup);
+    lastAppliedBackup = null;
   }
 
   private async hydrateState() {
@@ -255,6 +285,8 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         if (!updatedContent) {
           this.post({ type: 'result', payload: raw || result });
         } else {
+          // Backup full file before applying (single-shot path)
+          lastAppliedBackup = { uri: document.uri.toString(), content: fileText };
           await applyFullDocumentEdit(activeEditor, updatedContent);
           const colored = buildColoredUnifiedDiff(fileText, updatedContent);
           this.post({ type: 'diff', payload: { summary: summary || 'Applied changes', diff: colored } });
@@ -302,6 +334,10 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
             currentDoc.lineAt(start).range.start,
             currentDoc.lineAt(end - 1).range.end
           );
+          // Backup before applying first chunk across the entire file (original full text)
+          if (!lastAppliedBackup) {
+            lastAppliedBackup = { uri: document.uri.toString(), content: originalFullText };
+          }
           await activeEditor.edit(editBuilder => {
             editBuilder.replace(rangeToReplace, updatedChunk);
           });
@@ -338,7 +374,9 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         button:hover { filter: brightness(1.05); }
         .row { display:flex; gap: 8px; }
         .status { color: var(--muted); font-size: 11px; }
-        .output { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 65vh; overflow: auto; }
+        .output { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 18vh; overflow: auto; transition: max-height 0.2s ease; }
+        .output.expanded { max-height: 65vh; }
+        .ghost-btn { background: transparent; color: var(--fg); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; padding: 6px 8px; cursor: pointer; }
         .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; color: var(--muted); }
         @keyframes spin { to { transform: rotate(360deg); } }
       </style>
@@ -370,6 +408,16 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         function getModels() {
           vscode.postMessage({ type: 'getModels' });
         }
+        function toggleOutput() {
+          const out = document.getElementById('output');
+          const btn = document.getElementById('toggleOutputBtn');
+          if (!out || !btn) return;
+          const expanded = out.classList.toggle('expanded');
+          btn.textContent = expanded ? 'Collapse' : 'Expand';
+        }
+        function revertChanges() {
+          vscode.postMessage({ type: 'revertChanges' });
+        }
         function onModelList(models) {
           const select = document.getElementById('modelId');
           if (!select) return;
@@ -392,9 +440,13 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           const saveBtn = document.getElementById('saveBtn');
           const runBtn = document.getElementById('runBtn');
           const getModelsBtn = document.getElementById('getModelsBtn');
+          const toggleOutputBtn = document.getElementById('toggleOutputBtn');
+          const revertBtn = document.getElementById('revertBtn');
           if (saveBtn) saveBtn.addEventListener('click', save);
           if (runBtn) runBtn.addEventListener('click', run);
           if (getModelsBtn) getModelsBtn.addEventListener('click', getModels);
+          if (toggleOutputBtn) toggleOutputBtn.addEventListener('click', toggleOutput);
+          if (revertBtn) revertBtn.addEventListener('click', revertChanges);
           // Restore unsaved UI state (persists across view reloads)
           const s = vscode.getState() || {};
           if (s.endpoint) {
@@ -519,7 +571,13 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
               <div id="status" class="status" style="margin-top:6px;"></div>
             </div>
             <div class="card">
-              <label>Output</label>
+              <div class="row" style="justify-content: space-between; align-items: center;">
+                <label style="margin:0">Output</label>
+                <div class="row" style="gap:6px;">
+                  <button id="revertBtn" class="ghost-btn" title="Revert last applied edits">Revert</button>
+                  <button id="toggleOutputBtn" class="ghost-btn">Expand</button>
+                </div>
+              </div>
               <div id="output" class="output"></div>
             </div>
           </div>
