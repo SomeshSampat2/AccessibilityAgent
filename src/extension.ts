@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { diffLines, Change, applyPatch } from 'diff';
 
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand('accessibleAgent.helloWorld', () => {
@@ -19,10 +20,7 @@ export function activate(context: vscode.ExtensionContext) {
       const fileText = document.getText();
       const uiContext = detectUiContext(document, fileText);
 
-      if (!uiContext.isUiFile) {
-        vscode.window.showInformationMessage('This file does not appear to be a UI file; no accessibility actions to perform.');
-        return;
-      }
+      // Proceed even if not detected as a UI file; treat as 'unknown' to still apply improvements
 
       const endpoint = getEndpointFromEnvOrSettings();
       const token = resolveConfigValue('SRC_ACCESS_TOKEN', 'accessibleAgent.srcAccessToken');
@@ -51,9 +49,30 @@ export function activate(context: vscode.ExtensionContext) {
         },
         async () => {
           try {
+            // Let user pick a model for this run
+            try {
+              const models = await listModels({ endpoint, token });
+              const picked = await vscode.window.showQuickPick(
+                models.map(m => ({ label: m.id, description: m.owned_by || '' })),
+                { placeHolder: 'Select a model for accessibility edits' }
+              );
+              if (picked?.label) {
+                modelId = picked.label;
+                await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
+              }
+            } catch {}
+
             const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
-            const doc = await vscode.workspace.openTextDocument({ content: result, language: 'markdown' });
-            await vscode.window.showTextDocument(doc, { preview: false });
+            const { updatedContent, summary, raw } = extractUpdatedFileAndSummary(result, fileText);
+            if (!updatedContent) {
+              const doc = await vscode.workspace.openTextDocument({ content: raw || result, language: 'markdown' });
+              await vscode.window.showTextDocument(doc, { preview: false });
+              return;
+            }
+            // Apply edit to current document
+            await applyFullDocumentEdit(activeEditor, updatedContent);
+            // Show diff and summary in a new diff tab for better UX
+            await openVsCodeDiff(document, fileText, updatedContent, summary);
           } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
             vscode.window.showErrorMessage(`AccessibleAgent error: ${message}`);
@@ -125,6 +144,13 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const hasToken = Boolean(token);
     const canRun = hasEndpoint && hasToken;
     this.post({ type: 'hydrate', payload: { endpoint, tokenMasked: maskToken(token), modelId, hasEndpoint, hasToken, canRun } });
+    // Try to populate models list if we have configuration
+    if (canRun) {
+      try {
+        const models = await listModels({ endpoint, token });
+        this.post({ type: 'models', payload: models });
+      } catch {}
+    }
   }
 
   private async saveCredentials(token: string, modelId: string, endpoint?: string) {
@@ -152,11 +178,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const document = activeEditor.document;
     const fileText = document.getText();
     const uiContext = detectUiContext(document, fileText);
-    if (!uiContext.isUiFile) {
-      this.post({ type: 'status', payload: 'This file is not a UI file.' });
-      this.post({ type: 'loading', payload: false });
-      return;
-    }
+    // Proceed even if not detected as a UI file; treat as generic
 
     const endpoint = getEndpointFromEnvOrSettings();
     const tokenFromSecrets = await this.context.secrets.get('accessibleAgent.srcAccessToken');
@@ -180,11 +202,42 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
       content: fileText,
     });
 
+    this.post({ type: 'status', payload: 'Fetching models…' });
+    // Step 1: list models for the UI to render
+    try {
+      const models = await listModels({ endpoint, token });
+      this.post({ type: 'models', payload: models });
+    } catch (err) {
+      // Non-fatal; continue with configured model
+    }
+
     this.post({ type: 'status', payload: 'Contacting Cody API…' });
     try {
       console.log('[AccessibleAgent] Calling Cody API', { endpoint, modelId });
+      // Let user pick a model for this run
+      try {
+        const models = await listModels({ endpoint, token });
+        this.post({ type: 'models', payload: models });
+        const picked = await vscode.window.showQuickPick(
+          models.map(m => ({ label: m.id, description: m.owned_by || '' })),
+          { placeHolder: 'Select a model for accessibility edits' }
+        );
+        if (picked?.label) {
+          modelId = picked.label;
+          await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
+        }
+      } catch {}
+
       const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
-      this.post({ type: 'result', payload: result });
+      const { updatedContent, summary, raw } = extractUpdatedFileAndSummary(result, fileText);
+      if (!updatedContent) {
+        this.post({ type: 'result', payload: raw || result });
+      } else {
+        await applyFullDocumentEdit(activeEditor, updatedContent);
+        const colored = buildColoredUnifiedDiff(fileText, updatedContent);
+        this.post({ type: 'diff', payload: { summary: summary || 'Applied changes', diff: colored } });
+        await openVsCodeDiff(document, fileText, updatedContent, summary);
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[AccessibleAgent] Cody API error', message);
@@ -210,7 +263,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         button:hover { filter: brightness(1.05); }
         .row { display:flex; gap: 8px; }
         .status { color: var(--muted); font-size: 11px; }
-        .output { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 40vh; overflow: auto; }
+        .output { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 65vh; overflow: auto; }
         .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; color: var(--muted); }
         @keyframes spin { to { transform: rotate(360deg); } }
       </style>
@@ -226,6 +279,17 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         }
         function run() {
           vscode.postMessage({ type: 'makeAccessible' });
+        }
+        function onModelList(models) {
+          const select = document.getElementById('modelId');
+          if (!select) return;
+          select.innerHTML = '';
+          for (const m of models) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.id + (m.owned_by ? ' (' + m.owned_by + ')' : '');
+            select.appendChild(opt);
+          }
         }
         document.addEventListener('DOMContentLoaded', () => {
           const saveBtn = document.getElementById('saveBtn');
@@ -245,6 +309,9 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
             const runBtn = document.getElementById('runBtn');
             if (runBtn) runBtn.disabled = !msg.payload.canRun;
           }
+          if (msg.type === 'models') {
+            onModelList(msg.payload || []);
+          }
           if (msg.type === 'status') {
             document.getElementById('status').textContent = msg.payload;
           }
@@ -255,6 +322,21 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           if (msg.type === 'result') {
             document.getElementById('status').textContent = 'Done.';
             document.getElementById('output').textContent = msg.payload;
+          }
+          if (msg.type === 'diff') {
+            document.getElementById('status').textContent = 'Applied edits.';
+            const out = document.getElementById('output');
+            const { summary, diff } = msg.payload || {};
+            out.innerHTML = '';
+            const sum = document.createElement('div');
+            sum.textContent = summary || '';
+            sum.style.marginBottom = '8px';
+            out.appendChild(sum);
+            const pre = document.createElement('pre');
+            pre.style.whiteSpace = 'pre-wrap';
+            pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+            pre.innerHTML = diff;
+            out.appendChild(pre);
           }
           if (msg.type === 'loading') {
             const spinner = document.getElementById('spinner');
@@ -288,11 +370,8 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
               <input id="endpointInput" type="text" placeholder="https://your-host.sourcegraph.com" />
               <label style="margin-top:6px;">Access Token</label>
               <input id="token" type="password" placeholder="token-********" />
-              <label style="margin-top:6px;">Model</label>
-              <select id="modelId">
-                <option value="anthropic::2023-06-01::claude-3.5-sonnet">Anthropic Claude 3.5 Sonnet</option>
-                <option value="anthropic::2023-06-01::claude-3.5-haiku">Anthropic Claude 3.5 Haiku</option>
-              </select>
+               <label style="margin-top:6px;">Model</label>
+               <select id="modelId"></select>
               <div class="row" style="margin-top:8px; align-items:center;">
                 <button id="saveBtn">Save</button>
                 <button id="runBtn">Make This File Accessible</button>
@@ -413,9 +492,9 @@ Follow platform-specific best practices:
 - Web (HTML/React): use semantic elements, ARIA roles/states only when semantics missing, alt text for images, label controls, keyboard navigation, focus management.
 - iOS SwiftUI: use accessibilityLabel, accessibilityHint, traits, accessibilitySortPriority; group elements appropriately.
 - Flutter: use Semantics widgets, exclude semantics for decorative elements, provide labels and hints.
-Output format:
-1) Summary of changes
-2) Updated file content in a single code block
+  Output format:
+  1) Summary of changes
+  2) Updated file content in a single code block
 `;
 
   const fileBlock = '```\n' + input.content + '\n```';
@@ -425,7 +504,8 @@ Output format:
 async function callCodyApi(params: { endpoint: string; token: string; modelId: string; userPrompt: string }): Promise<string> {
   const url = `${params.endpoint.replace(/\/$/, '')}/.api/llm/chat/completions`;
   const body = {
-    max_tokens: 2000,
+    // Respect API cap but do not artificially reduce; omit to let server choose, or set to 4000 per docs
+    max_tokens: 4000,
     messages: [
       {
         content: params.userPrompt,
@@ -462,6 +542,95 @@ async function callCodyApi(params: { endpoint: string; token: string; modelId: s
     throw new Error('Unexpected Cody API response: missing message content.');
   }
   return content;
+}
+
+async function listModels(params: { endpoint: string; token: string }): Promise<Array<{ id: string; owned_by?: string }>> {
+  const url = `${params.endpoint.replace(/\/$/, '')}/.api/llm/models`;
+  const fetchImpl: any = (globalThis as any).fetch
+    ? (globalThis as any).fetch
+    : (await import('undici')).fetch;
+  const response = await fetchImpl(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `token ${params.token}`,
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Models request failed (${response.status}): ${text.substring(0, 300)}`);
+  }
+  const json = (await response.json()) as any;
+  const data = Array.isArray(json?.data) ? json.data : [];
+  return data.map((m: any) => ({ id: String(m?.id || ''), owned_by: m?.owned_by ? String(m.owned_by) : undefined })).filter((m: any) => m.id);
+}
+
+function extractUpdatedFileAndSummary(modelText: string, original: string): { updatedContent?: string; summary?: string; raw?: string } {
+  // Expect the model to produce a summary and a single code block. We parse the first fenced block.
+  const codeBlockMatch = modelText.match(/```[a-zA-Z0-9]*\n([\s\S]*?)\n```/);
+  if (!codeBlockMatch) {
+    return { raw: modelText };
+  }
+  const updated = codeBlockMatch[1];
+  // Try to capture a short summary: take content before the code block up to ~1k chars
+  const pre = modelText.slice(0, codeBlockMatch.index || 0).trim();
+  const summary = pre.split(/\n+/).slice(0, 20).join('\n');
+  if (!updated || updated.trim().length === 0 || updated.trim() === original.trim()) {
+    return { raw: modelText };
+  }
+  return { updatedContent: updated, summary };
+}
+
+async function applyFullDocumentEdit(editor: vscode.TextEditor, newContent: string): Promise<void> {
+  const document = editor.document;
+  const fullRange = new vscode.Range(
+    document.positionAt(0),
+    document.positionAt(document.getText().length)
+  );
+  await editor.edit(editBuilder => {
+    editBuilder.replace(fullRange, newContent);
+  });
+  await document.save();
+}
+
+function buildColoredUnifiedDiff(oldText: string, newText: string): string {
+  const parts: Change[] = diffLines(oldText, newText);
+  // Build HTML with color spans
+  const lines: string[] = [];
+  for (const part of parts) {
+    const color = part.added ? '#22c55e' : part.removed ? '#ef4444' : '#94a3b8';
+    const prefix = part.added ? '+' : part.removed ? '-' : ' ';
+    const segment = part.value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const segmentLines = segment.split('\n');
+    for (let i = 0; i < segmentLines.length; i++) {
+      const line = segmentLines[i];
+      if (line.length === 0 && i === segmentLines.length - 1) continue;
+      lines.push(`<span style=\"color:${color}\">${prefix}${line}</span>`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function openVsCodeDiff(
+  originalDoc: vscode.TextDocument,
+  originalText: string,
+  newText: string,
+  summary?: string
+): Promise<void> {
+  const left = await vscode.workspace.openTextDocument({ content: originalText, language: originalDoc.languageId });
+  const right = await vscode.workspace.openTextDocument({ content: newText, language: originalDoc.languageId });
+  // Use untitled URIs so VS Code can diff ephemeral content without a custom scheme provider
+  const leftUri = vscode.Uri.parse(`untitled:${originalDoc.fileName}.before`);
+  const rightUri = vscode.Uri.parse(`untitled:${originalDoc.fileName}.after`);
+  await vscode.commands.executeCommand(
+    'vscode.diff',
+    leftUri,
+    rightUri,
+    `Accessible changes: ${originalDoc.fileName}`
+  );
+  if (summary) {
+    vscode.window.showInformationMessage(summary);
+  }
 }
 
 

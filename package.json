@@ -73,8 +73,12 @@
     "watch": "tsc -watch -p ./",
     "lint": "echo \"No lint configured\""
   },
+  "dependencies": {
+    "diff": "^5.2.0"
+  },
   "devDependencies": {
     "@types/node": "^20.11.30",
+    "@types/diff": "^7.0.0",
     "@types/vscode": "1.90.0",
     "typescript": "^5.4.5",
     "undici": "^6.19.8"
