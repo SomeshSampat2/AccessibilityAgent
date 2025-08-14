@@ -3,7 +3,7 @@ import { diffLines, Change, applyPatch } from 'diff';
 
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand('accessibleAgent.helloWorld', () => {
-    vscode.window.showInformationMessage('AccessibleAgent is ready.');
+    vscode.window.showInformationMessage('Galaxy Accessibility Agent is ready.');
   });
   context.subscriptions.push(disposable);
 
@@ -44,7 +44,7 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'AccessibleAgent: Analyzing and proposing accessibility improvements…',
+          title: 'Galaxy Accessibility Agent: Analyzing and proposing accessibility improvements…',
           cancellable: false,
         },
         async () => {
@@ -65,17 +65,15 @@ export function activate(context: vscode.ExtensionContext) {
             const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
             const { updatedContent, summary, raw } = extractUpdatedFileAndSummary(result, fileText);
             if (!updatedContent) {
-              const doc = await vscode.workspace.openTextDocument({ content: raw || result, language: 'markdown' });
-              await vscode.window.showTextDocument(doc, { preview: false });
+              vscode.window.showInformationMessage('No structured update found. Check the sidebar output.');
               return;
             }
             // Apply edit to current document
             await applyFullDocumentEdit(activeEditor, updatedContent);
-            // Show diff and summary in a new diff tab for better UX
-            await openVsCodeDiff(document, fileText, updatedContent, summary);
+            vscode.window.setStatusBarMessage('Galaxy Accessibility Agent: Edits applied', 3000);
           } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
-            vscode.window.showErrorMessage(`AccessibleAgent error: ${message}`);
+            vscode.window.showErrorMessage(`Galaxy Accessibility Agent error: ${message}`);
           }
         }
       );
@@ -215,48 +213,105 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const userPrompt = buildUserPrompt({
-      fileName: document.fileName,
-      languageId: document.languageId,
-      uiKind: uiContext.uiKind,
-      content: fileText,
-    });
+    // If the file is small enough, process in one shot; otherwise process in chunks
+    const totalLines = document.lineCount;
+    const CHUNK_MAX_LINES = 300;
 
+    // Step 1: optionally refresh model list (for UI)
     this.post({ type: 'status', payload: 'Fetching models…' });
-    // Step 1: optionally refresh model list
     try {
       const models = await listModels({ endpoint, token });
       this.post({ type: 'models', payload: models });
-    } catch (err) {}
+    } catch {}
 
-    this.post({ type: 'status', payload: 'Contacting Cody API…' });
+    // Maybe let the user pick a model if not provided
+    if (!payload?.modelId) {
+      try {
+        const models = await listModels({ endpoint, token });
+        this.post({ type: 'models', payload: models });
+        const picked = await vscode.window.showQuickPick(
+          models.map(m => ({ label: (m.id || '').split('::').pop() || m.id, description: m.owned_by || '', id: m.id }) as any),
+          { placeHolder: 'Select a model for accessibility edits' }
+        );
+        if ((picked as any)?.id) {
+          modelId = (picked as any).id;
+          await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
+        }
+      } catch {}
+    }
+
     try {
-      console.log('[AccessibleAgent] Calling Cody API', { endpoint, modelId });
-      // If a model was not provided by payload, let the user pick
-      if (!payload?.modelId) {
-        try {
-          const models = await listModels({ endpoint, token });
-          this.post({ type: 'models', payload: models });
-          const picked = await vscode.window.showQuickPick(
-            models.map(m => ({ label: (m.id || '').split('::').pop() || m.id, description: m.owned_by || '', id: m.id }) as any),
-            { placeHolder: 'Select a model for accessibility edits' }
-          );
-          if ((picked as any)?.id) {
-            modelId = (picked as any).id;
-            await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
-          }
-        } catch {}
-      }
-
-      const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
-      const { updatedContent, summary, raw } = extractUpdatedFileAndSummary(result, fileText);
-      if (!updatedContent) {
-        this.post({ type: 'result', payload: raw || result });
+      if (totalLines <= CHUNK_MAX_LINES) {
+        // Single-shot
+        const userPrompt = buildUserPrompt({
+          fileName: document.fileName,
+          languageId: document.languageId,
+          uiKind: uiContext.uiKind,
+          content: fileText,
+        });
+        this.post({ type: 'status', payload: 'Contacting Cody API…' });
+        const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
+        const { updatedContent, summary, raw } = extractUpdatedFileAndSummary(result, fileText);
+        if (!updatedContent) {
+          this.post({ type: 'result', payload: raw || result });
+        } else {
+          await applyFullDocumentEdit(activeEditor, updatedContent);
+          const colored = buildColoredUnifiedDiff(fileText, updatedContent);
+          this.post({ type: 'diff', payload: { summary: summary || 'Applied changes', diff: colored } });
+        }
       } else {
-        await applyFullDocumentEdit(activeEditor, updatedContent);
-        const colored = buildColoredUnifiedDiff(fileText, updatedContent);
-        this.post({ type: 'diff', payload: { summary: summary || 'Applied changes', diff: colored } });
-        await openVsCodeDiff(document, fileText, updatedContent, summary);
+        // Chunked processing
+        const originalFullText = fileText;
+        let workingText = originalFullText;
+        const chunks: Array<{ start: number; end: number }> = [];
+        for (let start = 0; start < totalLines; start += CHUNK_MAX_LINES) {
+          const end = Math.min(start + CHUNK_MAX_LINES, totalLines);
+          chunks.push({ start, end });
+        }
+
+        for (let i = 0; i < chunks.length; i++) {
+          const { start, end } = chunks[i];
+          this.post({ type: 'status', payload: `Processing chunk ${i + 1}/${chunks.length} (lines ${start + 1}-${end})…` });
+
+          // Re-read current document to ensure we operate on latest content after prior chunk edits
+          const currentDoc = activeEditor.document;
+          const currentText = currentDoc.getText();
+          const currentLines = currentText.split(/\r?\n/);
+          const chunkText = currentLines.slice(start, end).join('\n');
+
+          const chunkPrompt = buildChunkPrompt({
+            fileName: document.fileName,
+            languageId: document.languageId,
+            uiKind: uiContext.uiKind,
+            chunkIndex: i + 1,
+            totalChunks: chunks.length,
+            startLineOneBased: start + 1,
+            endLineOneBased: end,
+            chunkContent: chunkText,
+          });
+
+          const apiResult = await callCodyApi({ endpoint, token, modelId, userPrompt: chunkPrompt });
+          const { updatedContent: updatedChunk, raw: rawChunk } = extractUpdatedFileAndSummary(apiResult, chunkText);
+          if (!updatedChunk) {
+            // If no structured chunk returned, skip applying and continue
+            continue;
+          }
+
+          // Apply replacement of this chunk's range with updated chunk content
+          const rangeToReplace = new vscode.Range(
+            currentDoc.lineAt(start).range.start,
+            currentDoc.lineAt(end - 1).range.end
+          );
+          await activeEditor.edit(editBuilder => {
+            editBuilder.replace(rangeToReplace, updatedChunk);
+          });
+          await currentDoc.save();
+        }
+
+        // After all chunks, compute diff vs original and show summary
+        const finalText = activeEditor.document.getText();
+        const colored = buildColoredUnifiedDiff(originalFullText, finalText);
+        this.post({ type: 'diff', payload: { summary: `Applied chunked edits in ${chunks.length} chunks.`, diff: colored } });
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -272,14 +327,14 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const csp = `default-src 'none'; img-src ${webview.cspSource} https:; script-src 'nonce-${nonce}'; style-src ${webview.cspSource} 'unsafe-inline';`;
     const styles = `
       <style>
-        :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#94a3b8; --accent:#22c55e; --accent2:#3b82f6; }
+        :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#94a3b8; --accent:#FA4616; --accent2:#FA4616; }
         body { background: var(--bg); color: var(--fg); font-family: ui-sans-serif, system-ui, -apple-system; margin: 0; }
         .container { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
         h2 { margin: 0 0 4px; font-size: 15px; }
         .card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px; }
         label { display:block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
         input, select, textarea { width: 100%; padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: var(--fg); }
-        button { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #000; font-weight: 600; border: none; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
+        button { background: var(--accent); color: #fff; font-weight: 600; border: none; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
         button:hover { filter: brightness(1.05); }
         .row { display:flex; gap: 8px; }
         .status { color: var(--muted); font-size: 11px; }
@@ -445,7 +500,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         <body>
           <div class="container">
             <div class="card">
-              <h2>AccessibleAgent</h2>
+              <h2>Galaxy Accessibility Agent</h2>
               <div class="badge">Uses Cody API chat completions</div>
             </div>
             <div class="card">
@@ -582,6 +637,34 @@ Follow platform-specific best practices:
 `;
 
   const fileBlock = '```\n' + input.content + '\n```';
+  return [header, context, guidelines, fileBlock].join('\n\n');
+}
+
+function buildChunkPrompt(input: {
+  fileName: string;
+  languageId: string;
+  uiKind: UiKind;
+  chunkIndex: number;
+  totalChunks: number;
+  startLineOneBased: number;
+  endLineOneBased: number;
+  chunkContent: string;
+}): string {
+  const header = `You are an expert accessibility engineer. Improve only the provided line range of this file to be accessible without changing behavior.`;
+  const context = `
+File: ${input.fileName}
+VS Code languageId: ${input.languageId}
+UI context: ${input.uiKind}
+Chunk: ${input.chunkIndex}/${input.totalChunks}
+Lines: ${input.startLineOneBased}-${input.endLineOneBased}
+`;
+  const guidelines = `
+Rules:
+- Only return the updated content for these lines, no extra commentary around it.
+- Keep code style and indentation consistent.
+- Do not include surrounding lines outside this range.
+`;
+  const fileBlock = '```\n' + input.chunkContent + '\n```';
   return [header, context, guidelines, fileBlock].join('\n\n');
 }
 
