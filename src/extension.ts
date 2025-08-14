@@ -446,6 +446,7 @@ async function callCodyApi(params: { endpoint: string; token: string; modelId: s
       Accept: 'application/json',
       'Content-Type': 'application/json',
       Authorization: `token ${params.token}`,
+      'X-Requested-With': 'accessible-agent 0.0.1',
     },
     body: JSON.stringify(body),
   });
