@@ -53,11 +53,11 @@ export function activate(context: vscode.ExtensionContext) {
             try {
               const models = await listModels({ endpoint, token });
               const picked = await vscode.window.showQuickPick(
-                models.map(m => ({ label: m.id, description: m.owned_by || '' })),
+                models.map(m => ({ label: (m.id || '').split('::').pop() || m.id, description: m.owned_by || '', id: m.id }) as any),
                 { placeHolder: 'Select a model for accessibility edits' }
               );
-              if (picked?.label) {
-                modelId = picked.label;
+              if ((picked as any)?.id) {
+                modelId = (picked as any).id;
                 await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
               }
             } catch {}
@@ -117,7 +117,27 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           break;
         }
         case 'makeAccessible': {
-          await this.runMakeAccessible();
+          await this.runMakeAccessible(message?.payload);
+          break;
+        }
+        case 'getModels': {
+          const endpoint = getEndpointFromEnvOrSettings();
+          const tokenFromSecrets = await this.context.secrets.get('accessibleAgent.srcAccessToken');
+          const tokenFromEnvOrSettings = resolveConfigValue('SRC_ACCESS_TOKEN', 'accessibleAgent.srcAccessToken');
+          const token = tokenFromSecrets || tokenFromEnvOrSettings;
+          if (!endpoint || !token) {
+            this.post({ type: 'status', payload: 'Missing endpoint or token.' });
+            break;
+          }
+          try {
+            this.post({ type: 'status', payload: 'Fetching models…' });
+            const models = await listModels({ endpoint, token });
+            this.post({ type: 'models', payload: models });
+            this.post({ type: 'status', payload: `Loaded ${models.length} models.` });
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.post({ type: 'error', payload: message });
+          }
           break;
         }
         default:
@@ -167,7 +187,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async runMakeAccessible() {
+  private async runMakeAccessible(payload?: { modelId?: string }) {
     this.post({ type: 'loading', payload: true });
     const activeEditor = vscode.window.activeTextEditor;
     if (!activeEditor) {
@@ -184,7 +204,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const tokenFromSecrets = await this.context.secrets.get('accessibleAgent.srcAccessToken');
     const tokenFromEnvOrSettings = resolveConfigValue('SRC_ACCESS_TOKEN', 'accessibleAgent.srcAccessToken');
     const token = tokenFromSecrets || tokenFromEnvOrSettings;
-    let modelId = resolveConfigValue('CODY_MODEL_ID', 'accessibleAgent.modelId') || 'anthropic::2023-06-01::claude-3.5-sonnet';
+    let modelId = payload?.modelId || resolveConfigValue('CODY_MODEL_ID', 'accessibleAgent.modelId') || 'anthropic::2023-06-01::claude-3.5-sonnet';
 
     if (!endpoint || !token) {
       const missing: string[] = [];
@@ -203,30 +223,30 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     });
 
     this.post({ type: 'status', payload: 'Fetching models…' });
-    // Step 1: list models for the UI to render
+    // Step 1: optionally refresh model list
     try {
       const models = await listModels({ endpoint, token });
       this.post({ type: 'models', payload: models });
-    } catch (err) {
-      // Non-fatal; continue with configured model
-    }
+    } catch (err) {}
 
     this.post({ type: 'status', payload: 'Contacting Cody API…' });
     try {
       console.log('[AccessibleAgent] Calling Cody API', { endpoint, modelId });
-      // Let user pick a model for this run
-      try {
-        const models = await listModels({ endpoint, token });
-        this.post({ type: 'models', payload: models });
-        const picked = await vscode.window.showQuickPick(
-          models.map(m => ({ label: m.id, description: m.owned_by || '' })),
-          { placeHolder: 'Select a model for accessibility edits' }
-        );
-        if (picked?.label) {
-          modelId = picked.label;
-          await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
-        }
-      } catch {}
+      // If a model was not provided by payload, let the user pick
+      if (!payload?.modelId) {
+        try {
+          const models = await listModels({ endpoint, token });
+          this.post({ type: 'models', payload: models });
+          const picked = await vscode.window.showQuickPick(
+            models.map(m => ({ label: (m.id || '').split('::').pop() || m.id, description: m.owned_by || '', id: m.id }) as any),
+            { placeHolder: 'Select a model for accessibility edits' }
+          );
+          if ((picked as any)?.id) {
+            modelId = (picked as any).id;
+            await vscode.workspace.getConfiguration().update('accessibleAgent.modelId', modelId, vscode.ConfigurationTarget.Global);
+          }
+        } catch {}
+      }
 
       const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
       const { updatedContent, summary, raw } = extractUpdatedFileAndSummary(result, fileText);
@@ -271,31 +291,76 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const script = `
       <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        let maskedTokenFromSaved = '';
+        function persistState() {
+          const endpoint = (document.getElementById('endpointInput')?.value || '').trim();
+          const tokenField = (document.getElementById('token')?.value || '').trim();
+          const modelId = (document.getElementById('modelId')?.value || '').trim();
+          vscode.setState({ endpoint, tokenField, modelId });
+        }
         function save() {
-          const token = document.getElementById('token').value.trim();
+          const tokenInput = document.getElementById('token');
+          const tokenVal = tokenInput.value.trim();
+          // If user didn't change the masked token, don't overwrite stored secret
+          const token = (!tokenVal || tokenVal === maskedTokenFromSaved || tokenVal.includes('…')) ? '' : tokenVal;
           const modelId = document.getElementById('modelId').value.trim();
           const endpoint = (document.getElementById('endpointInput')?.value || '').trim();
           vscode.postMessage({ type: 'saveCredentials', payload: { token, modelId, endpoint } });
+          persistState();
         }
         function run() {
-          vscode.postMessage({ type: 'makeAccessible' });
+          const selectedModel = document.getElementById('modelId')?.value || '';
+          vscode.postMessage({ type: 'makeAccessible', payload: { modelId: selectedModel } });
+        }
+        function getModels() {
+          vscode.postMessage({ type: 'getModels' });
         }
         function onModelList(models) {
           const select = document.getElementById('modelId');
           if (!select) return;
+          const previous = (vscode.getState()?.modelId) || select.value;
           select.innerHTML = '';
           for (const m of models) {
             const opt = document.createElement('option');
             opt.value = m.id;
-            opt.textContent = m.id + (m.owned_by ? ' (' + m.owned_by + ')' : '');
+            const parts = String(m.id).split('::');
+            const display = parts.length ? parts[parts.length - 1] : String(m.id);
+            opt.textContent = display;
+            opt.title = String(m.id);
             select.appendChild(opt);
+          }
+          if (previous) {
+            select.value = previous;
           }
         }
         document.addEventListener('DOMContentLoaded', () => {
           const saveBtn = document.getElementById('saveBtn');
           const runBtn = document.getElementById('runBtn');
+          const getModelsBtn = document.getElementById('getModelsBtn');
           if (saveBtn) saveBtn.addEventListener('click', save);
           if (runBtn) runBtn.addEventListener('click', run);
+          if (getModelsBtn) getModelsBtn.addEventListener('click', getModels);
+          // Restore unsaved UI state (persists across view reloads)
+          const s = vscode.getState() || {};
+          if (s.endpoint) {
+            const el = document.getElementById('endpointInput');
+            if (el) el.value = s.endpoint;
+          }
+          if (s.modelId) {
+            const m = document.getElementById('modelId');
+            if (m) m.value = s.modelId;
+          }
+          if (s.tokenField) {
+            const t = document.getElementById('token');
+            if (t) t.value = s.tokenField;
+          }
+          // Persist on changes
+          const endpointEl = document.getElementById('endpointInput');
+          const tokenEl = document.getElementById('token');
+          const modelEl = document.getElementById('modelId');
+          if (endpointEl) endpointEl.addEventListener('input', persistState);
+          if (tokenEl) tokenEl.addEventListener('input', persistState);
+          if (modelEl) modelEl.addEventListener('change', persistState);
         });
         window.addEventListener('message', (event) => {
           const msg = event.data;
@@ -303,9 +368,25 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
             if (msg.payload.endpoint) {
               const el = document.getElementById('endpointInput');
               if (el) el.value = msg.payload.endpoint;
+              const s = vscode.getState() || {};
+              vscode.setState({ ...s, endpoint: msg.payload.endpoint });
             }
-            if (msg.payload.modelId) document.getElementById('modelId').value = msg.payload.modelId;
-            if (msg.payload.tokenMasked) document.getElementById('token').placeholder = msg.payload.tokenMasked;
+            if (msg.payload.modelId) {
+              const m = document.getElementById('modelId');
+              if (m) m.value = msg.payload.modelId;
+              const s = vscode.getState() || {};
+              vscode.setState({ ...s, modelId: msg.payload.modelId });
+            }
+            if (msg.payload.tokenMasked) {
+              const t = document.getElementById('token');
+              maskedTokenFromSaved = msg.payload.tokenMasked;
+              if (t) {
+                // Show masked token as value (not just placeholder) so it doesn't look empty
+                t.value = maskedTokenFromSaved;
+              }
+              const s = vscode.getState() || {};
+              vscode.setState({ ...s, tokenField: maskedTokenFromSaved });
+            }
             const runBtn = document.getElementById('runBtn');
             if (runBtn) runBtn.disabled = !msg.payload.canRun;
           }
@@ -341,9 +422,11 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           if (msg.type === 'loading') {
             const spinner = document.getElementById('spinner');
             const runBtn = document.getElementById('runBtn');
+            const getModelsBtn = document.getElementById('getModelsBtn');
             const saveBtn = document.getElementById('saveBtn');
             if (spinner) spinner.style.display = msg.payload ? 'inline-block' : 'none';
             if (runBtn) runBtn.disabled = !!msg.payload;
+            if (getModelsBtn) getModelsBtn.disabled = !!msg.payload;
             if (saveBtn) saveBtn.disabled = !!msg.payload;
           }
         });
@@ -372,8 +455,9 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
               <input id="token" type="password" placeholder="token-********" />
                <label style="margin-top:6px;">Model</label>
                <select id="modelId"></select>
-              <div class="row" style="margin-top:8px; align-items:center;">
+              <div class="row" style="margin-top:8px; align-items:center; flex-wrap: wrap;">
                 <button id="saveBtn">Save</button>
+                <button id="getModelsBtn" title="Fetch available models from Cody API">Get Models</button>
                 <button id="runBtn">Make This File Accessible</button>
                 <span id="spinner" style="display:none;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite"></span>
               </div>
@@ -554,6 +638,7 @@ async function listModels(params: { endpoint: string; token: string }): Promise<
     headers: {
       Accept: 'application/json',
       Authorization: `token ${params.token}`,
+      'X-Requested-With': 'accessible-agent 0.0.1',
     },
   });
   if (!response.ok) {
