@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { diffLines, Change, applyPatch } from 'diff';
 import { getPresetRules, RulesPreset } from './rules';
 
@@ -306,7 +307,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           lastAppliedBackup = { uri: document.uri.toString(), content: fileText };
           await applyFullDocumentEdit(activeEditor, updatedContent);
           const colored = buildColoredUnifiedDiff(fileText, updatedContent);
-          this.post({ type: 'diff', payload: { summary: summary || 'Applied changes', diff: colored } });
+          this.post({ type: 'diff', payload: { summary: summary || 'Applied changes', diff: colored, fileName: path.basename(document.fileName) } });
         }
       } else {
         // Chunked processing
@@ -365,7 +366,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         // After all chunks, compute diff vs original and show summary
         const finalText = activeEditor.document.getText();
         const colored = buildColoredUnifiedDiff(originalFullText, finalText);
-        this.post({ type: 'diff', payload: { summary: `Applied chunked edits in ${chunks.length} chunks.`, diff: colored } });
+        this.post({ type: 'diff', payload: { summary: `Applied chunked edits in ${chunks.length} chunks.`, diff: colored, fileName: path.basename(document.fileName) } });
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -382,12 +383,13 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const styles = `
       <style>
         :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#94a3b8; --accent:#FA4616; --accent2:#FA4616; }
-        body { background: var(--bg); color: var(--fg); font-family: ui-sans-serif, system-ui, -apple-system; margin: 0; }
-        .container { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+        body { background: var(--bg); color: var(--fg); font-family: ui-sans-serif, system-ui, -apple-system; margin: 0; overflow-x: hidden; }
+        .container { padding: 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; overflow-x: hidden; }
         h2 { margin: 0 0 4px; font-size: 15px; }
         .card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px; }
         label { display:block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
-        input, select, textarea { width: 100%; padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: var(--fg); }
+        input, select, textarea { width: 100%; max-width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05); color: var(--fg); min-width: 0; }
+        #endpointInput { text-overflow: ellipsis; }
         button { background: var(--accent); color: #fff; font-weight: 600; border: none; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
         button:hover { filter: brightness(1.05); }
         .row { display:flex; gap: 8px; }
@@ -397,6 +399,10 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         .ghost-btn { background: transparent; color: var(--fg); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; padding: 6px 8px; cursor: pointer; }
         .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; color: var(--muted); }
         .rules-box { width: 100%; min-height: 80px; max-height: 200px; resize: vertical; }
+        .code-card { border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; background: rgba(255,255,255,0.03); overflow: hidden; }
+        .code-card-header { display:flex; align-items:center; justify-content: space-between; padding: 6px 10px; font-size: 12px; color: var(--muted); border-bottom: 1px solid rgba(255,255,255,0.08); }
+        .code-card-body { padding: 8px; }
+        .code-card-body pre { background: transparent; margin: 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
       </style>
     `;
@@ -571,17 +577,27 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           if (msg.type === 'diff') {
             document.getElementById('status').textContent = 'Applied edits.';
             const out = document.getElementById('output');
-            const { summary, diff } = msg.payload || {};
+            const { summary, diff, fileName } = msg.payload || {};
             out.innerHTML = '';
             const sum = document.createElement('div');
             sum.textContent = summary || '';
             sum.style.marginBottom = '8px';
             out.appendChild(sum);
+            const card = document.createElement('div');
+            card.className = 'code-card';
+            const header = document.createElement('div');
+            header.className = 'code-card-header';
+            header.innerHTML = '<strong>' + (fileName || 'Updated file diff') + '</strong>';
+            const body = document.createElement('div');
+            body.className = 'code-card-body';
             const pre = document.createElement('pre');
             pre.style.whiteSpace = 'pre-wrap';
             pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
             pre.innerHTML = diff;
-            out.appendChild(pre);
+            body.appendChild(pre);
+            card.appendChild(header);
+            card.appendChild(body);
+            out.appendChild(card);
           }
           if (msg.type === 'loading') {
             const spinner = document.getElementById('spinner');
