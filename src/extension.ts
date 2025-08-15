@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { diffLines, Change, applyPatch } from 'diff';
+import { getPresetRules, RulesPreset } from './rules';
 
 let lastAppliedBackup: { uri: string; content: string } | null = null;
 
@@ -110,11 +111,17 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
         case 'saveCredentials': {
-          const { token, modelId, endpoint } = message.payload ?? {};
-          await this.saveCredentials(token, modelId, endpoint);
+          const { token, modelId, endpoint, rulesPreset, rulesText } = message.payload ?? {};
+          await this.saveCredentials(token, modelId, endpoint, rulesPreset, rulesText);
           this.post({ type: 'status', payload: 'Saved credentials.' });
           // Refresh state to enable the Run button if token is present
           await this.hydrateState();
+          break;
+        }
+        case 'getPresetRules': {
+          const preset = (message.payload?.preset || '').trim();
+          const rules = getPresetRules(preset as RulesPreset);
+          this.post({ type: 'presetRules', payload: rules });
           break;
         }
         case 'makeAccessible': {
@@ -188,10 +195,12 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     const tokenFromSecrets = await this.context.secrets.get('accessibleAgent.srcAccessToken');
     const tokenFromConfig = config.get<string>('accessibleAgent.srcAccessToken') || '';
     const token = tokenFromSecrets || tokenFromConfig;
+    const rulesPreset = this.context.globalState.get<string>('accessibleAgent.rulesPreset') || '';
+    const rulesText = this.context.globalState.get<string>('accessibleAgent.rulesText') || '';
     const hasEndpoint = Boolean(endpoint);
     const hasToken = Boolean(token);
     const canRun = hasEndpoint && hasToken;
-    this.post({ type: 'hydrate', payload: { endpoint, tokenMasked: maskToken(token), modelId, hasEndpoint, hasToken, canRun } });
+    this.post({ type: 'hydrate', payload: { endpoint, tokenMasked: maskToken(token), modelId, hasEndpoint, hasToken, canRun, rulesPreset, rulesText } });
     // Try to populate models list if we have configuration
     if (canRun) {
       try {
@@ -201,7 +210,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async saveCredentials(token: string, modelId: string, endpoint?: string) {
+  private async saveCredentials(token: string, modelId: string, endpoint?: string, rulesPreset?: string, rulesText?: string) {
     const config = vscode.workspace.getConfiguration();
     // Endpoint is fixed by environment var; do not store
     if (modelId && modelId.trim()) {
@@ -212,6 +221,12 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
     }
     if (endpoint && endpoint.trim()) {
       await config.update('accessibleAgent.srcEndpoint', endpoint.trim(), vscode.ConfigurationTarget.Global);
+    }
+    if (typeof rulesPreset === 'string') {
+      await this.context.globalState.update('accessibleAgent.rulesPreset', rulesPreset);
+    }
+    if (typeof rulesText === 'string') {
+      await this.context.globalState.update('accessibleAgent.rulesText', rulesText);
     }
   }
 
@@ -245,6 +260,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
 
     // If the file is small enough, process in one shot; otherwise process in chunks
     const totalLines = document.lineCount;
+    const configRulesText = (this.context.globalState.get<string>('accessibleAgent.rulesText') || '').trim();
     const CHUNK_MAX_LINES = 300;
 
     // Step 1: optionally refresh model list (for UI)
@@ -278,6 +294,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           languageId: document.languageId,
           uiKind: uiContext.uiKind,
           content: fileText,
+          extraRules: configRulesText,
         });
         this.post({ type: 'status', payload: 'Contacting Cody API…' });
         const result = await callCodyApi({ endpoint, token, modelId, userPrompt });
@@ -320,6 +337,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
             startLineOneBased: start + 1,
             endLineOneBased: end,
             chunkContent: chunkText,
+            extraRules: configRulesText,
           });
 
           const apiResult = await callCodyApi({ endpoint, token, modelId, userPrompt: chunkPrompt });
@@ -378,6 +396,7 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
         .output.expanded { max-height: 65vh; }
         .ghost-btn { background: transparent; color: var(--fg); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; padding: 6px 8px; cursor: pointer; }
         .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; color: var(--muted); }
+        .rules-box { width: 100%; min-height: 80px; max-height: 200px; resize: vertical; }
         @keyframes spin { to { transform: rotate(360deg); } }
       </style>
     `;
@@ -389,7 +408,9 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           const endpoint = (document.getElementById('endpointInput')?.value || '').trim();
           const tokenField = (document.getElementById('token')?.value || '').trim();
           const modelId = (document.getElementById('modelId')?.value || '').trim();
-          vscode.setState({ endpoint, tokenField, modelId });
+          const rulesPreset = (document.getElementById('rulesPreset')?.value || '').trim();
+          const rulesText = (document.getElementById('rulesText')?.value || '').trim();
+          vscode.setState({ endpoint, tokenField, modelId, rulesPreset, rulesText });
         }
         function save() {
           const tokenInput = document.getElementById('token');
@@ -398,8 +419,14 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           const token = (!tokenVal || tokenVal === maskedTokenFromSaved || tokenVal.includes('…')) ? '' : tokenVal;
           const modelId = document.getElementById('modelId').value.trim();
           const endpoint = (document.getElementById('endpointInput')?.value || '').trim();
-          vscode.postMessage({ type: 'saveCredentials', payload: { token, modelId, endpoint } });
+          const rulesPreset = document.getElementById('rulesPreset')?.value || '';
+          const rulesText = document.getElementById('rulesText')?.value || '';
+          vscode.postMessage({ type: 'saveCredentials', payload: { token, modelId, endpoint, rulesPreset, rulesText } });
           persistState();
+        }
+        function onRulesPresetChange() {
+          const preset = document.getElementById('rulesPreset')?.value || '';
+          vscode.postMessage({ type: 'getPresetRules', payload: { preset } });
         }
         function run() {
           const selectedModel = document.getElementById('modelId')?.value || '';
@@ -442,11 +469,15 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           const getModelsBtn = document.getElementById('getModelsBtn');
           const toggleOutputBtn = document.getElementById('toggleOutputBtn');
           const revertBtn = document.getElementById('revertBtn');
+          const rulesPresetEl = document.getElementById('rulesPreset');
+          const rulesTextEl = document.getElementById('rulesText');
           if (saveBtn) saveBtn.addEventListener('click', save);
           if (runBtn) runBtn.addEventListener('click', run);
           if (getModelsBtn) getModelsBtn.addEventListener('click', getModels);
           if (toggleOutputBtn) toggleOutputBtn.addEventListener('click', toggleOutput);
           if (revertBtn) revertBtn.addEventListener('click', revertChanges);
+          if (rulesPresetEl) rulesPresetEl.addEventListener('change', onRulesPresetChange);
+          if (rulesTextEl) rulesTextEl.addEventListener('input', persistState);
           // Restore unsaved UI state (persists across view reloads)
           const s = vscode.getState() || {};
           if (s.endpoint) {
@@ -460,6 +491,14 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
           if (s.tokenField) {
             const t = document.getElementById('token');
             if (t) t.value = s.tokenField;
+          }
+          if (s.rulesPreset) {
+            const rp = document.getElementById('rulesPreset');
+            if (rp) rp.value = s.rulesPreset;
+          }
+          if (typeof s.rulesText === 'string') {
+            const rt = document.getElementById('rulesText');
+            if (rt) rt.value = s.rulesText;
           }
           // Persist on changes
           const endpointEl = document.getElementById('endpointInput');
@@ -494,11 +533,29 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
               const s = vscode.getState() || {};
               vscode.setState({ ...s, tokenField: maskedTokenFromSaved });
             }
+            if (typeof msg.payload.rulesPreset === 'string') {
+              const rp = document.getElementById('rulesPreset');
+              if (rp) rp.value = msg.payload.rulesPreset;
+              const s = vscode.getState() || {};
+              vscode.setState({ ...s, rulesPreset: msg.payload.rulesPreset });
+            }
+            if (typeof msg.payload.rulesText === 'string') {
+              const rt = document.getElementById('rulesText');
+              if (rt) rt.value = msg.payload.rulesText;
+              const s = vscode.getState() || {};
+              vscode.setState({ ...s, rulesText: msg.payload.rulesText });
+            }
             const runBtn = document.getElementById('runBtn');
             if (runBtn) runBtn.disabled = !msg.payload.canRun;
           }
           if (msg.type === 'models') {
             onModelList(msg.payload || []);
+          }
+          if (msg.type === 'presetRules') {
+            const rulesBox = document.getElementById('rulesText');
+            if (rulesBox) rulesBox.value = msg.payload || '';
+            const s = vscode.getState() || {};
+            vscode.setState({ ...s, rulesText: msg.payload || '' });
           }
           if (msg.type === 'status') {
             document.getElementById('status').textContent = msg.payload;
@@ -562,6 +619,19 @@ class AccessibleAgentSidebarProvider implements vscode.WebviewViewProvider {
               <input id="token" type="password" placeholder="token-********" />
                <label style="margin-top:6px;">Model</label>
                <select id="modelId"></select>
+               <div class="row" style="margin-top:6px; gap:8px; align-items:center;">
+                 <div style="flex:1;">
+                   <label>Rules preset (optional)</label>
+                   <select id="rulesPreset">
+                     <option value="">None</option>
+                     <option value="android">Android</option>
+                     <option value="ios">iOS</option>
+                     <option value="web">Web</option>
+                   </select>
+                 </div>
+               </div>
+               <label style="margin-top:6px;">Rules for accessibility (optional)</label>
+               <textarea id="rulesText" class="rules-box" placeholder="Add or edit rules here…"></textarea>
               <div class="row" style="margin-top:8px; align-items:center; flex-wrap: wrap;">
                 <button id="saveBtn">Save</button>
                 <button id="getModelsBtn" title="Fetch available models from Cody API">Get Models</button>
@@ -674,7 +744,7 @@ function detectUiContext(document: vscode.TextDocument, text: string): { isUiFil
   return { isUiFile: false, uiKind: 'unknown' };
 }
 
-function buildUserPrompt(input: { fileName: string; languageId: string; uiKind: UiKind; content: string }): string {
+function buildUserPrompt(input: { fileName: string; languageId: string; uiKind: UiKind; content: string; extraRules?: string }): string {
   const header = `You are an expert accessibility engineer. Improve accessibility in the following single file. Keep functional intent identical. Provide a short summary and the fully updated file. If no changes are needed, explain why.`;
   const context = `
 File: ${input.fileName}
@@ -694,8 +764,11 @@ Follow platform-specific best practices:
   2) Updated file content in a single code block
 `;
 
+  const extra = input.extraRules && input.extraRules.trim().length > 0
+    ? `\nAdditional rules to follow strictly (override where applicable):\n${input.extraRules}\n`
+    : '';
   const fileBlock = '```\n' + input.content + '\n```';
-  return [header, context, guidelines, fileBlock].join('\n\n');
+  return [header, context, guidelines + extra, fileBlock].join('\n\n');
 }
 
 function buildChunkPrompt(input: {
@@ -707,6 +780,7 @@ function buildChunkPrompt(input: {
   startLineOneBased: number;
   endLineOneBased: number;
   chunkContent: string;
+  extraRules?: string;
 }): string {
   const header = `You are an expert accessibility engineer. Improve only the provided line range of this file to be accessible without changing behavior.`;
   const context = `
@@ -722,8 +796,11 @@ Rules:
 - Keep code style and indentation consistent.
 - Do not include surrounding lines outside this range.
 `;
+  const extra = input.extraRules && input.extraRules.trim().length > 0
+    ? `\nAdditional rules to follow strictly (override where applicable):\n${input.extraRules}\n`
+    : '';
   const fileBlock = '```\n' + input.chunkContent + '\n```';
-  return [header, context, guidelines, fileBlock].join('\n\n');
+  return [header, context, guidelines + extra, fileBlock].join('\n\n');
 }
 
 async function callCodyApi(params: { endpoint: string; token: string; modelId: string; userPrompt: string }): Promise<string> {
